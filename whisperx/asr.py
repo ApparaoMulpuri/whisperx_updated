@@ -237,7 +237,8 @@ class FasterWhisperPipeline(Pipeline):
                 out['text'] = self.process_segment(audio_segment, processor_ml, model_ml)
             else:
                 # Ensure tokenizer is initialized
-                if self.tokenizer is None or self.tokenizer.language_code != detected_language:
+                # if self.tokenizer is None or self.tokenizer.language_code != detected_language:
+                if self.tokenizer is None:
                     print("Initializing tokenizer for the segment.")
                     task = task or "transcribe"
                     updated_tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
@@ -423,6 +424,7 @@ def load_model(whisper_arch,
         "max_new_tokens": None,
         "clip_timestamps": None,
         "hallucination_silence_threshold": None,
+        "hotwords": None,
     }
 
     if asr_options is not None:
