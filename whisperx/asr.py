@@ -195,15 +195,25 @@ class FasterWhisperPipeline(Pipeline):
         )
         print("vad_segments:", vad_segments)
         print("self.tokenizer:",self.tokenizer)
+
+        language = self.detect_language(audio)
+
+        # let the tokenizer be None if the language is different
         if self.tokenizer is None:
-            language = language or self.detect_language(audio)
             languages_identified.add(language)
             task = task or "transcribe"
             print("lang in if part",language)
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                 True, task=task,
                                                                 language=language)
-            print("updated_sef.tokenizer",self.tokenizer)
+            print("New Tokenizer is created",self.tokenizer)
+        
+        if language != self.tokenizer.language_code:
+            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
+                                                                True, task=task,
+                                                                language=language)
+            print("Tokenizer updated sef.tokenizer",self.tokenizer)
+        
         # else:
         #     language = language or self.tokenizer.language_code
         #     languages_identified.add(language)
