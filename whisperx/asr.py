@@ -179,7 +179,7 @@ class FasterWhisperPipeline(Pipeline):
         # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer
         if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']:
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                        True, task="transcribe",
+                                                        False, task="transcribe",
                                                         language=language)
             
         return self.tokenizer
@@ -218,7 +218,7 @@ class FasterWhisperPipeline(Pipeline):
             task = task or "transcribe"
             print("lang in if part",language)
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                True, task=task,
+                                                                False, task=task,
                                                                 language=language)
             print("New Tokenizer is created",self.tokenizer)
                 
@@ -346,7 +346,7 @@ def load_model(whisper_arch,
                          download_root=download_root,
                          cpu_threads=threads)
     if language is not None:
-        tokenizer = faster_whisper.tokenizer.Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task=task, language=language)
+        tokenizer = faster_whisper.tokenizer.Tokenizer(model.hf_tokenizer, False, task=task, language=language)
     else:
         print("No language specified, language will be first be detected for each audio file (increases inference time).")
         tokenizer = None
