@@ -175,7 +175,9 @@ class FasterWhisperPipeline(Pipeline):
         print("self.tokenizer:",self.tokenizer)
         print("language:",language)
         print("self.tokenizer.language_code:",self.tokenizer.language_code)
-        if self.tokenizer is None or self.tokenizer.language_code != language:
+
+        # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer
+        if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']:
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                         True, task="transcribe",
                                                         language=language)
@@ -253,8 +255,8 @@ class FasterWhisperPipeline(Pipeline):
                 text = text[0]
 
             language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
-            # print(f"language: {language}")
-            # print(f"adding language:{language} in segments traverse")
+            print(f"language: {language}")
+            print(f"adding language:{language} in segments traverse")
             languages_identified.add(language)
 
             # Get the tokenizer for the detected language
@@ -276,9 +278,6 @@ class FasterWhisperPipeline(Pipeline):
         if self.suppress_numerals:
             self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
 
-        lang_code_map = { "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu", "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada", "or": "Oriya", "pa": "Punjabi", "ml": "Malayalam"}
-        languages_identified = [lang_code_map[lang] for lang in languages_identified]
-
 
         print(f"languages_identified: {languages_identified} and count is: {len(languages_identified)}")            
 
@@ -286,16 +285,15 @@ class FasterWhisperPipeline(Pipeline):
 
 
     def detect_language(self, audio: np.ndarray):
-        # if audio.shape[0] < N_SAMPLES:
-        #     print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
+        if audio.shape[0] < N_SAMPLES:
+            print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
         model_n_mels = self.model.feat_kwargs.get("feature_size")
         segment = log_mel_spectrogram(audio[:N_SAMPLES],
                                       n_mels=model_n_mels if model_n_mels is not None else 80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.model.encode(segment)
         results = self.model.model.detect_language(encoder_output)
-        # print("lang_prob: ",results[0])
-
+        print(f"language probability results: {results[0]}")
         #lang_prob:  [('<|ur|>', 0.6630859375), ('<|hi|>', 0.2255859375), ('<|en|>', 0.023590087890625), ('<|sd|>', 0.0146484375), ('<|mi|>', 0.00821685791015625), ('<|bn|>', 0.00719451904296875), ('<|jw|>', 0.006916046142578125), ('<|pa|>', 0.005645751953125), ('<|ar|>', 0.0034236907958984375), ('<|ne|>', 0.0026874542236328125), ('<|da|>', 0.002506256103515625), ('<|fa|>', 0.002506256103515625), ('<|sa|>', 0.002227783203125), ('<|la|>', 0.0018911361694335938), ('<|de|>', 0.0017910003662109375), ('<|cy|>', 0.00176239013671875), ('<|es|>', 0.001708984375), ('<|ps|>', 0.0016956329345703125), ('<|ms|>', 0.001567840576171875), ('<|nn|>', 0.0013513565063476562), ('<|ta|>', 0.0013408660888671875), ('<|haw|>', 0.0012798309326171875), ('<|sn|>', 0.0011653900146484375), ('<|my|>', 0.0010528564453125), ('<|mr|>', 0.0010280609130859375), ('<|gl|>', 0.0009002685546875), ('<|pt|>', 0.0008525848388671875), ('<|ru|>', 0.0008196830749511719), ('<|uk|>', 0.0008006095886230469), ('<|tr|>', 0.0007944107055664062), ('<|te|>', 0.0006537437438964844), ('<|yo|>', 0.0006093978881835938), ('<|be|>', 0.0005636215209960938), ('<|ja|>', 0.0005335807800292969), ('<|nl|>', 0.0004973411560058594), ('<|it|>', 0.0004782676696777344), ('<|gu|>', 0.0004634857177734375), ('<|br|>', 0.0004353523254394531), ('<|cs|>', 0.0003902912139892578), ('<|zh|>', 0.0003783702850341797), ('<|ko|>', 0.00033783912658691406), ('<|yi|>', 0.00031113624572753906), ('<|bs|>', 0.00030517578125), ('<|si|>', 0.00029921531677246094), ('<|fo|>', 0.00029468536376953125), ('<|fr|>', 0.0002865791320800781), ('<|el|>', 0.0002651214599609375), ('<|bo|>', 0.00022852420806884766), ('<|hy|>', 0.00021982192993164062), ('<|pl|>', 0.0002040863037109375), ('<|eu|>', 0.00019860267639160156), ('<|ro|>', 0.0001678466796875), ('<|af|>', 0.0001558065414428711), ('<|vi|>', 0.0001475811004638672), ('<|ht|>', 0.00013017654418945312), ('<|yue|>', 0.0001246929168701172), ('<|ml|>', 0.00011903047561645508), ('<|oc|>', 0.00011581182479858398), ('<|as|>', 0.00011539459228515625), ('<|km|>', 0.00011092424392700195), ('<|he|>', 0.0001042485237121582), ('<|az|>', 9.60230827331543e-05), ('<|lo|>', 9.566545486450195e-05), ('<|tl|>', 8.344650268554688e-05), ('<|th|>', 8.308887481689453e-05), ('<|kn|>', 7.593631744384766e-05), ('<|sw|>', 6.008148193359375e-05), ('<|id|>', 5.84721565246582e-05), ('<|ln|>', 5.137920379638672e-05), ('<|is|>', 3.88026237487793e-05), ('<|sr|>', 3.600120544433594e-05), ('<|mn|>', 2.962350845336914e-05), ('<|sv|>', 2.872943878173828e-05), ('<|sl|>', 2.7835369110107422e-05), ('<|no|>', 2.771615982055664e-05), ('<|ca|>', 2.6047229766845703e-05), ('<|ka|>', 2.372264862060547e-05), ('<|bg|>', 2.3365020751953125e-05), ('<|kk|>', 1.823902130126953e-05), ('<|mk|>', 1.424551010131836e-05), ('<|sq|>', 1.33514404296875e-05), ('<|sk|>', 8.463859558105469e-06), ('<|so|>', 7.569789886474609e-06), ('<|lv|>', 7.212162017822266e-06), ('<|tg|>', 7.152557373046875e-06), ('<|hu|>', 6.079673767089844e-06), ('<|fi|>', 4.649162292480469e-06), ('<|hr|>', 4.410743713378906e-06), ('<|am|>', 3.2186508178710938e-06), ('<|mt|>', 2.2649765014648438e-06), ('<|su|>', 1.7881393432617188e-06), ('<|et|>', 1.3113021850585938e-06), ('<|uz|>', 9.5367431640625e-07), ('<|ha|>', 8.940696716308594e-07), ('<|tt|>', 8.344650268554688e-07), ('<|mg|>', 5.364418029785156e-07), ('<|lt|>', 4.76837158203125e-07), ('<|tk|>', 4.172325134277344e-07), ('<|ba|>', 3.5762786865234375e-07), ('<|lb|>', 2.980232238769531e-07)]
 
         selected_language = 'hi' #default to hindi
@@ -303,6 +301,7 @@ class FasterWhisperPipeline(Pipeline):
         allowed_languages = ['en', 'hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']
 
         for language_token, language_probability in results[0]:
+            print(f"lang_prob: {language_token}: {language_probability}")
             language = language_token[2:-2]
             if language in allowed_languages:
                 selected_language = language
@@ -363,7 +362,7 @@ def load_model(whisper_arch,
         "compression_ratio_threshold": 2.4,
         "log_prob_threshold": -1.0,
         "no_speech_threshold": 0.6,
-        "condition_on_previous_text": True,
+        "condition_on_previous_text": False,
         "prompt_reset_on_temperature": 0.5,
         "initial_prompt": None,
         "prefix": None,
