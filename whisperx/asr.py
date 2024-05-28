@@ -10,8 +10,12 @@ from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
 from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
+from .alignment import load_align_model,DEFAULT_ALIGN_MODELS_HF
 from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
+
+model_or, align_metadata,processor_or = load_align_model('or',device=None,model_name=None)
+model_ml, align_metadata,processor_ml = load_align_model('ml',device=None,model_name=None)
 
 def find_numeral_symbol_tokens(tokenizer):
     numeral_symbol_tokens = []
@@ -179,10 +183,19 @@ class FasterWhisperPipeline(Pipeline):
         # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer
         if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']:
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                        False, task="transcribe",
+                                                        True, task="transcribe",
                                                         language=language)
             
         return self.tokenizer
+
+
+    def process_segment(self, audio_segment, processor, model):
+        inputs = processor(audio_segment, sampling_rate=16_000, return_tensors="pt", padding=True)
+        with torch.no_grad():
+            logits = model(inputs.input_values, attention_mask=inputs.attention_mask).logits
+        predicted_ids = torch.argmax(logits, dim=-1)
+        return processor.batch_decode(predicted_ids)
+
 
     def transcribe(
         self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
@@ -218,20 +231,10 @@ class FasterWhisperPipeline(Pipeline):
             task = task or "transcribe"
             print("lang in if part",language)
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                False, task=task,
+                                                                True, task=task,
                                                                 language=language)
             print("New Tokenizer is created",self.tokenizer)
-                
-        # else:
-        #     language = language or self.tokenizer.language_code
-        #     languages_identified.add(language)
-        #     task = task or self.tokenizer.task
-        #     print("lang in else part",language)
-        #     if task != self.tokenizer.task or language != self.tokenizer.language_code:
-        #         self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-        #                                                             True, task=task,
-        #                                                             language=language)
-                
+                                
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
             numeral_symbol_tokens = find_numeral_symbol_tokens(self.tokenizer)
@@ -249,15 +252,23 @@ class FasterWhisperPipeline(Pipeline):
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
+
+            audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx]['end'], 3) * 16000)]
+            language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
+            print(f"language: {language}")
+            print(f"adding language:{language} in segments traverse")
+            languages_identified.add(language)
+
+            if language == 'or':
+                out['text'] = self.process_segment(audio_segment, processor_or, model_or)
+            elif language == 'ml':
+                out['text'] = self.process_segment(audio_segment, processor_ml, model_ml)
+
             # print("out",out)
             text = out['text']
             if batch_size in [0, 1, None]:
                 text = text[0]
 
-            language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
-            print(f"language: {language}")
-            print(f"adding language:{language} in segments traverse")
-            languages_identified.add(language)
 
             # Get the tokenizer for the detected language
             tokenizer = self.get_tokenizer(language)
@@ -278,6 +289,9 @@ class FasterWhisperPipeline(Pipeline):
         if self.suppress_numerals:
             self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
 
+
+        lang_code_map = {"en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu", "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada", "or": "Oriya", "pa": "Punjabi", "ml": "Malayalam"}
+        languages_identified = [lang_code_map[lang] for lang in languages_identified]
 
         print(f"languages_identified: {languages_identified} and count is: {len(languages_identified)}")            
 
@@ -346,10 +360,14 @@ def load_model(whisper_arch,
                          download_root=download_root,
                          cpu_threads=threads)
     if language is not None:
-        tokenizer = faster_whisper.tokenizer.Tokenizer(model.hf_tokenizer, False, task=task, language=language)
+        tokenizer = faster_whisper.tokenizer.Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task=task, language=language)
     else:
         print("No language specified, language will be first be detected for each audio file (increases inference time).")
         tokenizer = None
+
+    # Define the initial prompt
+    initial_prompt = "This audio contains a conversation entirely in Telugu. Please ensure all transcriptions are in Telugu, avoiding any Kannada words."
+
 
     default_asr_options =  {
         "beam_size": 5,
@@ -362,9 +380,9 @@ def load_model(whisper_arch,
         "compression_ratio_threshold": 2.4,
         "log_prob_threshold": -1.0,
         "no_speech_threshold": 0.6,
-        "condition_on_previous_text": False,
+        "condition_on_previous_text": True,
         "prompt_reset_on_temperature": 0.5,
-        "initial_prompt": None,
+        "initial_prompt": initial_prompt,
         "prefix": None,
         "suppress_blank": True,
         "suppress_tokens": [-1],
@@ -389,8 +407,8 @@ def load_model(whisper_arch,
     default_asr_options = faster_whisper.transcribe.TranscriptionOptions(**default_asr_options)
 
     default_vad_options = {
-        "vad_onset": 0.500,
-        "vad_offset": 0.363
+        "vad_onset": 0.100,
+        "vad_offset": 0.050
     }
 
     if vad_options is not None:
