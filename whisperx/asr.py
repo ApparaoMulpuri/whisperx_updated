@@ -183,9 +183,9 @@ class FasterWhisperPipeline(Pipeline):
         print("language:",language)
         print("self.tokenizer.language_code:",self.tokenizer.language_code)
 
-        # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer
-        if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']:
-            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
+        # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer. Exclude Telugu, Oriya and Malayalam from this.
+        if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'mr', 'ta', 'gu', 'kn', 'pa']:
+            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer
                                                         True, task="transcribe",
                                                         language=language)
             
