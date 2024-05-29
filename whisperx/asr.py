@@ -16,6 +16,9 @@ from .types import TranscriptionResult, SingleSegment
 
 model_or, align_metadata,processor_or = load_align_model('or',device=None,model_name=None)
 model_ml, align_metadata,processor_ml = load_align_model('ml',device=None,model_name=None)
+model_te, align_metadata,processor_te = load_align_model('te',device=None,model_name=None)
+model_kn, align_metadata,processor_kn = load_align_model('kn',device=None,model_name=None)
+model_pa, align_metadata,processor_pa = load_align_model('pa',device=None,model_name=None)
 
 def find_numeral_symbol_tokens(tokenizer):
     numeral_symbol_tokens = []
@@ -263,6 +266,12 @@ class FasterWhisperPipeline(Pipeline):
                 out['text'] = self.process_segment(audio_segment, processor_or, model_or)
             elif language == 'ml':
                 out['text'] = self.process_segment(audio_segment, processor_ml, model_ml)
+            elif language == 'te':
+                out['text'] = self.process_segment(audio_segment, processor_te, model_te)
+            elif language == 'kn':
+                out['text'] = self.process_segment(audio_segment, processor_kn, model_kn)
+            elif language == 'pa':
+                out['text'] = self.process_segment(audio_segment, processor_pa, model_pa)                                
 
             # print("out",out)
             text = out['text']
@@ -366,7 +375,7 @@ def load_model(whisper_arch,
         tokenizer = None
 
     # Define the initial prompt
-    initial_prompt = "This audio contains a conversation entirely in Telugu. Please ensure all transcriptions are in Telugu, avoiding any Kannada words."
+    # initial_prompt = "This audio contains a conversation entirely in Telugu. Please ensure all transcriptions are in Telugu, avoiding any Kannada words."
 
 
     default_asr_options =  {
@@ -382,7 +391,7 @@ def load_model(whisper_arch,
         "no_speech_threshold": 0.6,
         "condition_on_previous_text": True,
         "prompt_reset_on_temperature": 0.5,
-        "initial_prompt": initial_prompt,
+        "initial_prompt": None,
         "prefix": None,
         "suppress_blank": True,
         "suppress_tokens": [-1],
