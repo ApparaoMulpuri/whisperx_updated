@@ -309,7 +309,7 @@ class FasterWhisperPipeline(Pipeline):
         return {"segments": segments, "language": languages_identified}
 
 
-    def refine_text(text):
+    def refine_text(self, text):
         text = text.encode('ascii', 'ignore').decode('ascii')
         text = " ".join(text.split())
 
