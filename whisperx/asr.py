@@ -186,7 +186,7 @@ class FasterWhisperPipeline(Pipeline):
         # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer. Exclude Telugu, Oriya and Malayalam from this.
         if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'mr', 'ta', 'gu', 'kn', 'pa']:
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                True, task="transcribe",
+                                                                self.model.model.is_multilingual, task="transcribe",
                                                                 language=language)
             
         return self.tokenizer
@@ -231,12 +231,7 @@ class FasterWhisperPipeline(Pipeline):
         # let the tokenizer be None if the language is different
         if self.tokenizer is None:
             languages_identified.add(language)
-            task = task or "transcribe"
-            print("lang in if part",language)
-            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                True, task=task,
-                                                                language=language)
-            print("New Tokenizer is created",self.tokenizer)
+            self.tokenizer = self.get_tokenizer(language)
                                 
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
@@ -258,6 +253,10 @@ class FasterWhisperPipeline(Pipeline):
 
             audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx]['end'], 3) * 16000)]
             language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
+
+            # Get the tokenizer for the detected language
+            tokenizer = self.get_tokenizer(language)
+
             print(f"language: {language}")
             print(f"adding language:{language} in segments traverse")
             languages_identified.add(language)
@@ -277,10 +276,6 @@ class FasterWhisperPipeline(Pipeline):
             text = out['text']
             if batch_size in [0, 1, None]:
                 text = text[0]
-
-
-            # Get the tokenizer for the detected language
-            tokenizer = self.get_tokenizer(language)
 
             segments.append(
                 {
