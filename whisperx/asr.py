@@ -284,7 +284,7 @@ class FasterWhisperPipeline(Pipeline):
             languages_identified.add(actual_language)
             segments.append(
                 {
-                    "text": self.refine_text(text),
+                    "text": text,
                     "start": round(vad_segments[idx]['start'], 3),
                     "end": round(vad_segments[idx]['end'], 3)
                 }
