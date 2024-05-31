@@ -202,15 +202,16 @@ class FasterWhisperPipeline(Pipeline):
 
     def process_text(self, text, language):
         # text is a list type
-        text = text[0]
+        text_str = text[0]
+        print(f"In process_text text_str: {text_str}")
         print(f"In process_text text: {text}")
         print(f"In process_text language: {language}")
-        words = text.split()
+        words = text_str.split()
         filtered_words = []
         
         for word in words:
             try:
-                if detect(word) == language:
+                if detect(word) in [language, 'en']:
                     filtered_words.append(word)
             except LangDetectException:
                 pass
