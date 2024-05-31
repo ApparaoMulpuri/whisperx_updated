@@ -1,27 +1,24 @@
 import os
 import warnings
-import time
 from typing import List, Union, Optional, NamedTuple
-import requests
+
 import ctranslate2
 import faster_whisper
 import numpy as np
 import torch
-from transformers import pipeline
-import torchaudio
 from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
+
+from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .alignment import load_align_model,DEFAULT_ALIGN_MODELS_HF
-from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram,save_audio
 from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
 
-audio_classifier = pipeline(model=DEFAULT_ALIGN_MODELS_HF["ldet"])
 model_or, align_metadata,processor_or = load_align_model('or',device=None,model_name=None)
 model_ml, align_metadata,processor_ml = load_align_model('ml',device=None,model_name=None)
-resampler = torchaudio.transforms.Resample(48_000, 16_000)
-actual_language=""
-
+model_te, align_metadata,processor_te = load_align_model('te',device=None,model_name=None)
+model_kn, align_metadata,processor_kn = load_align_model('kn',device=None,model_name=None)
+model_pa, align_metadata,processor_pa = load_align_model('pa',device=None,model_name=None)
 
 def find_numeral_symbol_tokens(tokenizer):
     numeral_symbol_tokens = []
@@ -179,18 +176,40 @@ class FasterWhisperPipeline(Pipeline):
         model_iterator = PipelineIterator(dataloader, self.forward, forward_params, loader_batch_size=batch_size)
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
+    
+    def get_tokenizer(self, language):
+        print("get_tokenizer called")
+        print("self.tokenizer:",self.tokenizer)
+        print("language:",language)
+        print("self.tokenizer.language_code:",self.tokenizer.language_code)
+
+        # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer. Exclude Telugu, Oriya and Malayalam from this.
+        if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'mr', 'ta', 'gu', 'kn', 'pa']:
+            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
+                                                                self.model.model.is_multilingual, task="transcribe",
+                                                                language=language)
+            
+        return self.tokenizer
+
+
+    def process_segment(self, audio_segment, processor, model):
+        inputs = processor(audio_segment, sampling_rate=16_000, return_tensors="pt", padding=True)
+        with torch.no_grad():
+            logits = model(inputs.input_values, attention_mask=inputs.attention_mask).logits
+        predicted_ids = torch.argmax(logits, dim=-1)
+        return processor.batch_decode(predicted_ids)
+
 
     def transcribe(
         self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
     ) -> TranscriptionResult:
         
-        print("transcribe")
         languages_identified = set()
         if isinstance(audio, str):
             audio = load_audio(audio)
 
-        # print("audio.shape",audio.shape)
         def data(audio, segments):
+            # print(segments)
             for seg in segments:
                 f1 = int(seg['start'] * SAMPLE_RATE)
                 f2 = int(seg['end'] * SAMPLE_RATE)
@@ -204,37 +223,20 @@ class FasterWhisperPipeline(Pipeline):
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
-        # print("vad_segments:", vad_segments)
-        if self.tokenizer is None:
-            print("No tokenizer found, language will be first be detected for each audio file (increases inference time).")
-            global actual_language
-            actual_language=""
-            language = language or self.detect_language(audio)
-            languages_identified.add(actual_language)
-            task = task or "transcribe"
-            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                self.model.model.is_multilingual, task=task,
-                                                                language=language)
-        else:
-            # print("Using preset tokenizer.")
-            language = language or self.tokenizer.language_code
-            # print(f"Using preset language: {actual_language}")
-            languages_identified.add(actual_language)
-            # print(f"languages_identified: {languages_identified} and count is: {len(list(languages_identified))}")
-            task = task or self.tokenizer.task
-            if task != self.tokenizer.task or language != self.tokenizer.language_code:
-                # print("Tokenizer task or language does not match, reverting to preset tokenizer.")
-                # print(f"Tokenizer task: {task}, language: {language}")
-                self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
-                                                                    self.model.model.is_multilingual, task=task,
-                                                                    language=language)
-      
+        print("vad_segments:", vad_segments)
+        print("self.tokenizer:",self.tokenizer)
 
-        # print(f"Using tokenizer with task: {task} and language: {actual_language}")
+        language = self.detect_language(audio)
+
+        # let the tokenizer be None if the language is different
+        if self.tokenizer is None:
+            languages_identified.add(language)
+            self.tokenizer = self.get_tokenizer(language)
+                                
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
             numeral_symbol_tokens = find_numeral_symbol_tokens(self.tokenizer)
-            print(f"Suppressing numeral and symbol tokens")
+            print(f"Suppressing numeral and symbol tokens: {numeral_symbol_tokens}")
             new_suppressed_tokens = numeral_symbol_tokens + self.options.suppress_tokens
             new_suppressed_tokens = list(set(new_suppressed_tokens))
             self.options = self.options._replace(suppress_tokens=new_suppressed_tokens)
@@ -248,40 +250,33 @@ class FasterWhisperPipeline(Pipeline):
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
+
+            audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx]['end'], 3) * 16000)]
+            language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
+
+            # Get the tokenizer for the detected language
+            tokenizer = self.get_tokenizer(language)
+
+            print(f"language: {language}")
+            print(f"adding language:{language} in segments traverse")
+            languages_identified.add(language)
+
+            if language == 'or':
+                out['text'] = self.process_segment(audio_segment, processor_or, model_or)
+            elif language == 'ml':
+                out['text'] = self.process_segment(audio_segment, processor_ml, model_ml)
+            elif language == 'te':
+                out['text'] = self.process_segment(audio_segment, processor_te, model_te)
+            elif language == 'kn':
+                out['text'] = self.process_segment(audio_segment, processor_kn, model_kn)
+            elif language == 'pa':
+                out['text'] = self.process_segment(audio_segment, processor_pa, model_pa)                                
+
             # print("out",out)
-            # device=  
-           
-            if(actual_language=='or'):
-                #model_or, align_metadata,processor_or = load_align_model('or',device,model_name)
-                inputs = processor_or(audio[int(round(vad_segments[idx]['start'], 3)*16000):int(round(vad_segments[idx]['end'], 3)*16000)] , sampling_rate=16_000, return_tensors="pt", padding=True)
-
-                with torch.no_grad():
-                    logits = model_or(inputs.input_values, attention_mask=inputs.attention_mask).logits
-
-                predicted_ids = torch.argmax(logits, dim=-1)
-                out['text']=processor_or.batch_decode(predicted_ids)
-
-                 
-            if(actual_language=='ml'):
-                #model_ml, align_metadata,processor = load_align_model('ml',device,model_name)
-                inputs = processor_ml(audio[int(round(vad_segments[idx]['start'], 3)*16000):int(round(vad_segments[idx]['end'], 3)*16000)] , sampling_rate=16_000, return_tensors="pt", padding=True)
-
-                with torch.no_grad():
-                    logits = model_ml(inputs.input_values, attention_mask=inputs.attention_mask).logits
-
-                predicted_ids = torch.argmax(logits, dim=-1)
-                out['text']=processor_ml.batch_decode(predicted_ids)
-  
             text = out['text']
-            if isinstance(text, list):
-                text = " ".join(text)
-            # print(f"idx: {idx}, text: {text}")
             if batch_size in [0, 1, None]:
                 text = text[0]
 
-            language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
-            # print(f"Detected language: {actual_language} in the 8s chunk of audio...")
-            languages_identified.add(actual_language)
             segments.append(
                 {
                     "text": text,
@@ -289,8 +284,6 @@ class FasterWhisperPipeline(Pipeline):
                     "end": round(vad_segments[idx]['end'], 3)
                 }
             )
-
-            # print(f"languages_identified: {languages_identified} and count is: {len(list(languages_identified))}")
 
         # revert the tokenizer if multilingual inference is enabled
         if self.preset_language is None:
@@ -300,48 +293,25 @@ class FasterWhisperPipeline(Pipeline):
         if self.suppress_numerals:
             self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
 
-        lang_code_map = { "en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu", "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada", "or": "Oriya", "pa": "Punjabi", "ml": "Malayalam"}
 
-        print(f"languages_identified: {languages_identified} and count is: {len(list(languages_identified))}")
+        lang_code_map = {"en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu", "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada", "or": "Oriya", "pa": "Punjabi", "ml": "Malayalam"}
+        languages_identified = [lang_code_map[lang] for lang in languages_identified]
 
-        languages_identified = list(lang_code_map[lang] for lang in languages_identified)          
+        print(f"languages_identified: {languages_identified} and count is: {len(languages_identified)}")            
 
         return {"segments": segments, "language": languages_identified}
 
 
-    def refine_text(self, text):
-        text = text.encode('ascii', 'ignore').decode('ascii')
-        text = " ".join(text.split())
-
-    
-        for char in ["।", "?", "!", ":", ";"]:
-            text = text.replace(char, ".")
-    
-        return text
-    
-
-    '''
-    solution for language detection for every chunk - not effective in transcription
-    '''
-    
-
     def detect_language(self, audio: np.ndarray):
-        # print("detect_language in WhisperXPipeline...")
-        # if audio.shape[0] < N_SAMPLES:
-        #     print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
+        if audio.shape[0] < N_SAMPLES:
+            print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
         model_n_mels = self.model.feat_kwargs.get("feature_size")
-        # print("model_n_mels: ",model_n_mels)
         segment = log_mel_spectrogram(audio[:N_SAMPLES],
                                       n_mels=model_n_mels if model_n_mels is not None else 80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
-        # print("segment: ",segment)
-
-        # print("start encoder_output")
         encoder_output = self.model.encode(segment)
-        # print("encoder_output: ",encoder_output)
         results = self.model.model.detect_language(encoder_output)
-        #print("lang_prob: ",results[0])
-
+        print(f"language probability results: {results[0]}")
         #lang_prob:  [('<|ur|>', 0.6630859375), ('<|hi|>', 0.2255859375), ('<|en|>', 0.023590087890625), ('<|sd|>', 0.0146484375), ('<|mi|>', 0.00821685791015625), ('<|bn|>', 0.00719451904296875), ('<|jw|>', 0.006916046142578125), ('<|pa|>', 0.005645751953125), ('<|ar|>', 0.0034236907958984375), ('<|ne|>', 0.0026874542236328125), ('<|da|>', 0.002506256103515625), ('<|fa|>', 0.002506256103515625), ('<|sa|>', 0.002227783203125), ('<|la|>', 0.0018911361694335938), ('<|de|>', 0.0017910003662109375), ('<|cy|>', 0.00176239013671875), ('<|es|>', 0.001708984375), ('<|ps|>', 0.0016956329345703125), ('<|ms|>', 0.001567840576171875), ('<|nn|>', 0.0013513565063476562), ('<|ta|>', 0.0013408660888671875), ('<|haw|>', 0.0012798309326171875), ('<|sn|>', 0.0011653900146484375), ('<|my|>', 0.0010528564453125), ('<|mr|>', 0.0010280609130859375), ('<|gl|>', 0.0009002685546875), ('<|pt|>', 0.0008525848388671875), ('<|ru|>', 0.0008196830749511719), ('<|uk|>', 0.0008006095886230469), ('<|tr|>', 0.0007944107055664062), ('<|te|>', 0.0006537437438964844), ('<|yo|>', 0.0006093978881835938), ('<|be|>', 0.0005636215209960938), ('<|ja|>', 0.0005335807800292969), ('<|nl|>', 0.0004973411560058594), ('<|it|>', 0.0004782676696777344), ('<|gu|>', 0.0004634857177734375), ('<|br|>', 0.0004353523254394531), ('<|cs|>', 0.0003902912139892578), ('<|zh|>', 0.0003783702850341797), ('<|ko|>', 0.00033783912658691406), ('<|yi|>', 0.00031113624572753906), ('<|bs|>', 0.00030517578125), ('<|si|>', 0.00029921531677246094), ('<|fo|>', 0.00029468536376953125), ('<|fr|>', 0.0002865791320800781), ('<|el|>', 0.0002651214599609375), ('<|bo|>', 0.00022852420806884766), ('<|hy|>', 0.00021982192993164062), ('<|pl|>', 0.0002040863037109375), ('<|eu|>', 0.00019860267639160156), ('<|ro|>', 0.0001678466796875), ('<|af|>', 0.0001558065414428711), ('<|vi|>', 0.0001475811004638672), ('<|ht|>', 0.00013017654418945312), ('<|yue|>', 0.0001246929168701172), ('<|ml|>', 0.00011903047561645508), ('<|oc|>', 0.00011581182479858398), ('<|as|>', 0.00011539459228515625), ('<|km|>', 0.00011092424392700195), ('<|he|>', 0.0001042485237121582), ('<|az|>', 9.60230827331543e-05), ('<|lo|>', 9.566545486450195e-05), ('<|tl|>', 8.344650268554688e-05), ('<|th|>', 8.308887481689453e-05), ('<|kn|>', 7.593631744384766e-05), ('<|sw|>', 6.008148193359375e-05), ('<|id|>', 5.84721565246582e-05), ('<|ln|>', 5.137920379638672e-05), ('<|is|>', 3.88026237487793e-05), ('<|sr|>', 3.600120544433594e-05), ('<|mn|>', 2.962350845336914e-05), ('<|sv|>', 2.872943878173828e-05), ('<|sl|>', 2.7835369110107422e-05), ('<|no|>', 2.771615982055664e-05), ('<|ca|>', 2.6047229766845703e-05), ('<|ka|>', 2.372264862060547e-05), ('<|bg|>', 2.3365020751953125e-05), ('<|kk|>', 1.823902130126953e-05), ('<|mk|>', 1.424551010131836e-05), ('<|sq|>', 1.33514404296875e-05), ('<|sk|>', 8.463859558105469e-06), ('<|so|>', 7.569789886474609e-06), ('<|lv|>', 7.212162017822266e-06), ('<|tg|>', 7.152557373046875e-06), ('<|hu|>', 6.079673767089844e-06), ('<|fi|>', 4.649162292480469e-06), ('<|hr|>', 4.410743713378906e-06), ('<|am|>', 3.2186508178710938e-06), ('<|mt|>', 2.2649765014648438e-06), ('<|su|>', 1.7881393432617188e-06), ('<|et|>', 1.3113021850585938e-06), ('<|uz|>', 9.5367431640625e-07), ('<|ha|>', 8.940696716308594e-07), ('<|tt|>', 8.344650268554688e-07), ('<|mg|>', 5.364418029785156e-07), ('<|lt|>', 4.76837158203125e-07), ('<|tk|>', 4.172325134277344e-07), ('<|ba|>', 3.5762786865234375e-07), ('<|lb|>', 2.980232238769531e-07)]
 
         selected_language = 'hi' #default to hindi
@@ -349,30 +319,14 @@ class FasterWhisperPipeline(Pipeline):
         allowed_languages = ['en', 'hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']
 
         for language_token, language_probability in results[0]:
+            print(f"lang_prob: {language_token}: {language_probability}")
             language = language_token[2:-2]
             if language in allowed_languages:
                 selected_language = language
                 selected_language_probability = language_probability
                 break
-        global actual_language
-        if(actual_language==""):
-            if audio.shape[0] > N_SAMPLES:
-                audio=audio[0:N_SAMPLES]
-            
-            save_audio("output.wav", audio, sr=16000)
-            
-            actual_language=(audio_classifier("output.wav")[0]['label'][:2].lower())
-            
-             
-        if(actual_language=='or'):
-            selected_language_probability=1
-        else:
-            if(actual_language=='ml'):
-                actual_language='ml'
-            else:
-                actual_language=selected_language        
-        
-        # print(f"Detected language: {actual_language} ({selected_language_probability:.2f}) in the 8s chunk of audio...")
+
+        print(f"Detected language: {selected_language} ({selected_language_probability:.2f}) in first 30s of audio...")
         return selected_language
 
 def load_model(whisper_arch,
@@ -381,7 +335,6 @@ def load_model(whisper_arch,
                compute_type="float16",
                asr_options=None,
                language : Optional[str] = None,
-               vad_model=None,
                vad_options=None,
                model : Optional[WhisperModel] = None,
                task="transcribe",
@@ -416,6 +369,10 @@ def load_model(whisper_arch,
         print("No language specified, language will be first be detected for each audio file (increases inference time).")
         tokenizer = None
 
+    # Define the initial prompt
+    # initial_prompt = "This audio contains a conversation entirely in Telugu. Please ensure all transcriptions are in Telugu, avoiding any Kannada words."
+
+
     default_asr_options =  {
         "beam_size": 5,
         "best_of": 5,
@@ -427,7 +384,7 @@ def load_model(whisper_arch,
         "compression_ratio_threshold": 2.4,
         "log_prob_threshold": -1.0,
         "no_speech_threshold": 0.6,
-        "condition_on_previous_text": False,
+        "condition_on_previous_text": True,
         "prompt_reset_on_temperature": 0.5,
         "initial_prompt": None,
         "prefix": None,
@@ -442,6 +399,7 @@ def load_model(whisper_arch,
         "max_new_tokens": None,
         "clip_timestamps": None,
         "hallucination_silence_threshold": None,
+        "hotwords": None,
     }
 
     if asr_options is not None:
@@ -453,17 +411,14 @@ def load_model(whisper_arch,
     default_asr_options = faster_whisper.transcribe.TranscriptionOptions(**default_asr_options)
 
     default_vad_options = {
-        "vad_onset": 0.500,
-        "vad_offset": 0.363
+        "vad_onset": 0.100,
+        "vad_offset": 0.050
     }
 
     if vad_options is not None:
         default_vad_options.update(vad_options)
 
-    if vad_model is not None:
-        vad_model = vad_model
-    else:
-        vad_model = load_vad_model(torch.device(device), use_auth_token=None, **default_vad_options)
+    vad_model = load_vad_model(torch.device(device), use_auth_token=None, **default_vad_options)
 
     return FasterWhisperPipeline(
         model=model,
