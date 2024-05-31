@@ -201,6 +201,10 @@ class FasterWhisperPipeline(Pipeline):
         return processor.batch_decode(predicted_ids)
 
     def process_text(self, text, language):
+        # text is a list type
+        text = text[0]
+        print(f"In process_text text: {text}")
+        print(f"In process_text language: {language}")
         words = text.split()
         filtered_words = []
         
