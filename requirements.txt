@@ -7,3 +7,5 @@ setuptools>=65
 nltk
 scipy
 pyannote.audio
+langdetect==1.0.9
+nltk==3.8.1
