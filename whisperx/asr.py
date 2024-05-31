@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
+from langdetect import detect, DetectorFactory
+from langdetect.lang_detect_exception import LangDetectException
 
 from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .alignment import load_align_model,DEFAULT_ALIGN_MODELS_HF
@@ -177,10 +179,14 @@ class FasterWhisperPipeline(Pipeline):
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
     
-    def get_tokenizer(self, language):
+    def refresh_tokenizer(self, language):
+        # print("get_tokenizer called")
+        # print("self.tokenizer:",self.tokenizer)
+        # print("language:",language)
+
         # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer. Exclude Telugu, Oriya and Malayalam from this.
-        if self.tokenizer is None or self.tokenizer.language_code != language and language in ['hi', 'bn', 'mr', 'ta', 'gu', 'kn', 'pa']:
-            self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
+        if self.tokenizer is None or self.tokenizer.language_code != language:
+            return faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                 self.model.model.is_multilingual, task="transcribe",
                                                                 language=language)
             
@@ -193,6 +199,19 @@ class FasterWhisperPipeline(Pipeline):
             logits = model(inputs.input_values, attention_mask=inputs.attention_mask).logits
         predicted_ids = torch.argmax(logits, dim=-1)
         return processor.batch_decode(predicted_ids)
+
+    def process_text(self, text, language):
+        words = text.split()
+        filtered_words = []
+        
+        for word in words:
+            try:
+                if detect(word) == language:
+                    filtered_words.append(word)
+            except LangDetectException:
+                pass
+        
+        return ' '.join(filtered_words)
 
 
     def transcribe(
@@ -226,7 +245,7 @@ class FasterWhisperPipeline(Pipeline):
         # let the tokenizer be None if the language is different
         if self.tokenizer is None:
             languages_identified.add(language)
-            self.tokenizer = self.get_tokenizer(language)
+            self.tokenizer = self.refresh_tokenizer(language)
                                 
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
@@ -247,10 +266,14 @@ class FasterWhisperPipeline(Pipeline):
                 print(f"Progress: {percent_complete:.2f}%...")
 
             audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx]['end'], 3) * 16000)]
-            language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
 
-            # Get the tokenizer for the detected language
-            tokenizer = self.get_tokenizer(language)
+            if self.tokenizer is None or self.tokenizer.language_code not in ['te', 'or', 'ml', "kn", "pa"]:
+                # no need of language detection if the tokenizer is already set and language is one of the Indian languages
+                language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
+
+                # Get the tokenizer for the detected language
+                self.tokenizer = self.refresh_tokenizer(language)
+            
 
             print(f"language: {language}")
             print(f"adding language:{language} in segments traverse")
@@ -272,9 +295,14 @@ class FasterWhisperPipeline(Pipeline):
             if batch_size in [0, 1, None]:
                 text = text[0]
 
+            if len(text):
+                text = self.process_text(text, language)                
+
             segments.append(
                 {
-                    "text": text,
+                    # "Audio Unclear" needs to be displayed incase of text being empty refer Bug 81185: DAM: Admin: Empty time stamps 
+                    # are generated in the transcripts.
+                    "text": text if len(text) else "Audio Unclear",
                     "start": round(vad_segments[idx]['start'], 3),
                     "end": round(vad_segments[idx]['end'], 3)
                 }
@@ -364,10 +392,6 @@ def load_model(whisper_arch,
         print("No language specified, language will be first be detected for each audio file (increases inference time).")
         tokenizer = None
 
-    # Define the initial prompt
-    # initial_prompt = "This audio contains a conversation entirely in Telugu. Please ensure all transcriptions are in Telugu, avoiding any Kannada words."
-
-
     default_asr_options =  {
         "beam_size": 5,
         "best_of": 5,
@@ -388,8 +412,8 @@ def load_model(whisper_arch,
         "without_timestamps": True,
         "max_initial_timestamp": 0.0,
         "word_timestamps": False,
-        "prepend_punctuations": "\"'“¿([{-",
-        "append_punctuations": "\"'.。,，!！?？:：”)]}、",
+        "prepend_punctuations": None,
+        "append_punctuations": None,
         "suppress_numerals": False,
         "max_new_tokens": None,
         "clip_timestamps": None,
