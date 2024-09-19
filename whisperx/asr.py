@@ -1,6 +1,6 @@
 import os
-import warnings
 from typing import List, Union, Optional, NamedTuple
+# import uuid
 
 import ctranslate2
 import faster_whisper
@@ -15,6 +15,12 @@ from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .alignment import load_align_model,DEFAULT_ALIGN_MODELS_HF
 from .vad import load_vad_model, merge_chunks
 from .types import TranscriptionResult, SingleSegment
+from transformers import pipeline
+
+classifier = pipeline(
+    "audio-classification", model="sanchit-gandhi/whisper-medium-fleurs-lang-id", device="cuda" if torch.cuda.is_available() else "cpu"
+)
+
 
 model_or, align_metadata,processor_or = load_align_model('or',device=None,model_name=None)
 model_ml, align_metadata,processor_ml = load_align_model('ml',device=None,model_name=None)
@@ -179,26 +185,32 @@ class FasterWhisperPipeline(Pipeline):
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
     
-    def refresh_tokenizer(self, language):
+    def refresh_tokenizer(self, language, lang_def):
         # print("get_tokenizer called")
         # print("self.tokenizer:",self.tokenizer)
         # print("language:",language)
 
         # lets add a hack, if the language is other than indian languages, then we will not refresh the tokenizer. Exclude Telugu, Oriya and Malayalam from this.
-        if self.tokenizer is None or self.tokenizer.language_code != language:
+        if (language not in ["te", "or", "ml", "kn", "pa"] and ((self.tokenizer is None) or (self.tokenizer.language_code != language))):
             return faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                 self.model.model.is_multilingual, task="transcribe",
                                                                 language=language)
+        if self.tokenizer is None:
+            return faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
+                                                                self.model.model.is_multilingual, task="transcribe",
+                                                                language=lang_def)
             
         return self.tokenizer
 
 
     def process_segment(self, audio_segment, processor, model):
+        print("In process_segment")
         inputs = processor(audio_segment, sampling_rate=16_000, return_tensors="pt", padding=True)
         with torch.no_grad():
             logits = model(inputs.input_values, attention_mask=inputs.attention_mask).logits
         predicted_ids = torch.argmax(logits, dim=-1)
         return processor.batch_decode(predicted_ids)
+
 
     def process_text(self, text, language):
         text_to_process = ""
@@ -206,8 +218,9 @@ class FasterWhisperPipeline(Pipeline):
             text_to_process = text[0]
         else:
             text_to_process = text
-        print(f"In process_text text_to_process: {text_to_process}")
-        print(f"In process_text language: {language}")
+            
+        # print(f"In process_text text_to_process: {text_to_process}")
+        # print(f"In process_text language: {language}")
         words = text_to_process.split()
         filtered_words = []
         
@@ -226,6 +239,7 @@ class FasterWhisperPipeline(Pipeline):
     ) -> TranscriptionResult:
         
         languages_identified = set()
+        self.cnt = 0
         if isinstance(audio, str):
             audio = load_audio(audio)
 
@@ -244,15 +258,26 @@ class FasterWhisperPipeline(Pipeline):
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
-        print("vad_segments:", vad_segments)
-        print("self.tokenizer:",self.tokenizer)
 
-        language = self.detect_language(audio)
+        audio_segment = audio[int(round(vad_segments[0]['start'], 3) * 16000):int(round(vad_segments[-1]['end'], 3) * 16000)]
+        lang_def, lang_prob_def = self.detect_language_default(audio_segment)
+        if lang_prob_def <= 0.7:
+            lang_ext, lang_prob_ext = self.detect_language(audio_segment)
+            if lang_prob_def <= lang_prob_ext:
+                self.language, lang_prob = lang_ext, lang_prob_ext
+            else:
+                self.language, lang_prob = lang_def, lang_prob_def
+            print(f"language: {lang_ext}, lang_prob: {lang_prob_ext}")
+        else:
+            self.language, lang_prob = lang_def, lang_prob_def
+        print(f"language default: {lang_def}, lang_prob: {lang_prob_def}")
+
 
         # let the tokenizer be None if the language is different
         if self.tokenizer is None:
-            languages_identified.add(language)
-            self.tokenizer = self.refresh_tokenizer(language)
+            if lang_prob >= 0.7:
+                languages_identified.add(self.language)
+            self.tokenizer = self.refresh_tokenizer(self.language, lang_def)
                                 
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
@@ -266,44 +291,53 @@ class FasterWhisperPipeline(Pipeline):
         segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        for idx, out in enumerate(self.__call__(data(audio, vad_segments), batch_size=batch_size, num_workers=num_workers,language = language)):
+        for idx, out in enumerate(self.__call__(data(audio, vad_segments), batch_size=batch_size, num_workers=num_workers,language = self.language)):
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
+            if idx == total_segments-1:
+                audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx]['end'], 3) * 16000)]
+            else:
+                audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx+1]['start'], 3) * 16000)]
 
-            audio_segment = audio[int(round(vad_segments[idx]['start'], 3) * 16000):int(round(vad_segments[idx]['end'], 3) * 16000)]
+            # if self.tokenizer is None:
+            # no need of language detection if the tokenizer is already set and language is one of the Indian languages
+            lang_def, lang_prob_def = self.detect_language_default(audio_segment)
+            if lang_prob_def <= 0.7:
+                lang_ext, lang_prob_ext = self.detect_language(audio_segment)
+                if lang_prob_def <= lang_prob_ext:
+                    self.language, lang_prob = lang_ext, lang_prob_ext
+                else:
+                    self.language, lang_prob = lang_def, lang_prob_def
+                print(f"language: {lang_ext}, lang_prob: {lang_prob_ext}")
+            else:
+                self.language, lang_prob = lang_def, lang_prob_def
+            print(f"language default: {lang_def}, lang_prob: {lang_prob_def}")
+            # Get the tokenizer for the detected language
+            self.tokenizer = self.refresh_tokenizer(self.language, lang_def)
 
-            if self.tokenizer is None or self.tokenizer.language_code not in ['te', 'or', 'ml', "kn", "pa"]:
-                # no need of language detection if the tokenizer is already set and language is one of the Indian languages
-                language = self.detect_language(audio[idx*N_SAMPLES:(idx+1)*N_SAMPLES])
+            if lang_prob >= 0.7:
+                languages_identified.add(self.language)
 
-                # Get the tokenizer for the detected language
-                self.tokenizer = self.refresh_tokenizer(language)
-            
-
-            print(f"language: {language}")
-            print(f"adding language:{language} in segments traverse")
-            languages_identified.add(language)
-
-            if language == 'or':
-                out['text'] = self.process_segment(audio_segment, processor_or, model_or)
-            elif language == 'ml':
-                out['text'] = self.process_segment(audio_segment, processor_ml, model_ml)
-            elif language == 'te':
-                out['text'] = self.process_segment(audio_segment, processor_te, model_te)
-            elif language == 'kn':
-                out['text'] = self.process_segment(audio_segment, processor_kn, model_kn)
-            elif language == 'pa':
-                out['text'] = self.process_segment(audio_segment, processor_pa, model_pa)                                
+            if self.language == 'or':
+                out['text'] = self.process_segment(audio_segment, processor_or, model_or)[0]
+            elif self.language == 'ml':
+                out['text'] = self.process_segment(audio_segment, processor_ml, model_ml)[0]
+            elif self.language == 'te':
+                out['text'] = self.process_segment(audio_segment, processor_te, model_te)[0]
+            elif self.language == 'kn':
+                out['text'] = self.process_segment(audio_segment, processor_kn, model_kn)[0]
+            elif self.language == 'pa':
+                out['text'] = self.process_segment(audio_segment, processor_pa, model_pa)[0]
 
             # print("out",out)
             text = out['text']
             if batch_size in [0, 1, None]:
                 text = text[0]
 
-            if len(text):
-                text = self.process_text(text, language)                
+            # if len(text):
+            #     text = self.process_text(text, self.language)                
 
             segments.append(
                 {
@@ -324,7 +358,7 @@ class FasterWhisperPipeline(Pipeline):
             self.options = self.options._replace(suppress_tokens=previous_suppress_tokens)
 
 
-        lang_code_map = {"en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu", "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada", "or": "Oriya", "pa": "Punjabi", "ml": "Malayalam"}
+        lang_code_map = {"en": "English", "hi": "Hindi", "bn": "Bengali", "te": "Telugu", "mr": "Marathi", "ta": "Tamil", "gu": "Gujarati", "kn": "Kannada", "or": "Oriya", "pa": "Punjabi", "ml": "Malayalam", "as": "Assamese", "ur": "Urdu"}
         languages_identified = [lang_code_map[lang] for lang in languages_identified]
 
         print(f"languages_identified: {languages_identified} and count is: {len(languages_identified)}")            
@@ -332,7 +366,7 @@ class FasterWhisperPipeline(Pipeline):
         return {"segments": segments, "language": languages_identified}
 
 
-    def detect_language(self, audio: np.ndarray):
+    def detect_language_default(self, audio: np.ndarray):
         if audio.shape[0] < N_SAMPLES:
             print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
         model_n_mels = self.model.feat_kwargs.get("feature_size")
@@ -341,15 +375,15 @@ class FasterWhisperPipeline(Pipeline):
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.model.encode(segment)
         results = self.model.model.detect_language(encoder_output)
-        print(f"language probability results: {results[0]}")
+        # print(f"language probability results: {results[0][:10]}")
         #lang_prob:  [('<|ur|>', 0.6630859375), ('<|hi|>', 0.2255859375), ('<|en|>', 0.023590087890625), ('<|sd|>', 0.0146484375), ('<|mi|>', 0.00821685791015625), ('<|bn|>', 0.00719451904296875), ('<|jw|>', 0.006916046142578125), ('<|pa|>', 0.005645751953125), ('<|ar|>', 0.0034236907958984375), ('<|ne|>', 0.0026874542236328125), ('<|da|>', 0.002506256103515625), ('<|fa|>', 0.002506256103515625), ('<|sa|>', 0.002227783203125), ('<|la|>', 0.0018911361694335938), ('<|de|>', 0.0017910003662109375), ('<|cy|>', 0.00176239013671875), ('<|es|>', 0.001708984375), ('<|ps|>', 0.0016956329345703125), ('<|ms|>', 0.001567840576171875), ('<|nn|>', 0.0013513565063476562), ('<|ta|>', 0.0013408660888671875), ('<|haw|>', 0.0012798309326171875), ('<|sn|>', 0.0011653900146484375), ('<|my|>', 0.0010528564453125), ('<|mr|>', 0.0010280609130859375), ('<|gl|>', 0.0009002685546875), ('<|pt|>', 0.0008525848388671875), ('<|ru|>', 0.0008196830749511719), ('<|uk|>', 0.0008006095886230469), ('<|tr|>', 0.0007944107055664062), ('<|te|>', 0.0006537437438964844), ('<|yo|>', 0.0006093978881835938), ('<|be|>', 0.0005636215209960938), ('<|ja|>', 0.0005335807800292969), ('<|nl|>', 0.0004973411560058594), ('<|it|>', 0.0004782676696777344), ('<|gu|>', 0.0004634857177734375), ('<|br|>', 0.0004353523254394531), ('<|cs|>', 0.0003902912139892578), ('<|zh|>', 0.0003783702850341797), ('<|ko|>', 0.00033783912658691406), ('<|yi|>', 0.00031113624572753906), ('<|bs|>', 0.00030517578125), ('<|si|>', 0.00029921531677246094), ('<|fo|>', 0.00029468536376953125), ('<|fr|>', 0.0002865791320800781), ('<|el|>', 0.0002651214599609375), ('<|bo|>', 0.00022852420806884766), ('<|hy|>', 0.00021982192993164062), ('<|pl|>', 0.0002040863037109375), ('<|eu|>', 0.00019860267639160156), ('<|ro|>', 0.0001678466796875), ('<|af|>', 0.0001558065414428711), ('<|vi|>', 0.0001475811004638672), ('<|ht|>', 0.00013017654418945312), ('<|yue|>', 0.0001246929168701172), ('<|ml|>', 0.00011903047561645508), ('<|oc|>', 0.00011581182479858398), ('<|as|>', 0.00011539459228515625), ('<|km|>', 0.00011092424392700195), ('<|he|>', 0.0001042485237121582), ('<|az|>', 9.60230827331543e-05), ('<|lo|>', 9.566545486450195e-05), ('<|tl|>', 8.344650268554688e-05), ('<|th|>', 8.308887481689453e-05), ('<|kn|>', 7.593631744384766e-05), ('<|sw|>', 6.008148193359375e-05), ('<|id|>', 5.84721565246582e-05), ('<|ln|>', 5.137920379638672e-05), ('<|is|>', 3.88026237487793e-05), ('<|sr|>', 3.600120544433594e-05), ('<|mn|>', 2.962350845336914e-05), ('<|sv|>', 2.872943878173828e-05), ('<|sl|>', 2.7835369110107422e-05), ('<|no|>', 2.771615982055664e-05), ('<|ca|>', 2.6047229766845703e-05), ('<|ka|>', 2.372264862060547e-05), ('<|bg|>', 2.3365020751953125e-05), ('<|kk|>', 1.823902130126953e-05), ('<|mk|>', 1.424551010131836e-05), ('<|sq|>', 1.33514404296875e-05), ('<|sk|>', 8.463859558105469e-06), ('<|so|>', 7.569789886474609e-06), ('<|lv|>', 7.212162017822266e-06), ('<|tg|>', 7.152557373046875e-06), ('<|hu|>', 6.079673767089844e-06), ('<|fi|>', 4.649162292480469e-06), ('<|hr|>', 4.410743713378906e-06), ('<|am|>', 3.2186508178710938e-06), ('<|mt|>', 2.2649765014648438e-06), ('<|su|>', 1.7881393432617188e-06), ('<|et|>', 1.3113021850585938e-06), ('<|uz|>', 9.5367431640625e-07), ('<|ha|>', 8.940696716308594e-07), ('<|tt|>', 8.344650268554688e-07), ('<|mg|>', 5.364418029785156e-07), ('<|lt|>', 4.76837158203125e-07), ('<|tk|>', 4.172325134277344e-07), ('<|ba|>', 3.5762786865234375e-07), ('<|lb|>', 2.980232238769531e-07)]
 
         selected_language = 'hi' #default to hindi
         selected_language_probability = 0.0
-        allowed_languages = ['en', 'hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml']
+        allowed_languages = ['en', 'hi', 'bn', 'te', 'mr', 'ta', 'gu', 'kn', 'or', 'pa', 'ml', 'as', 'ur']
 
         for language_token, language_probability in results[0]:
-            print(f"lang_prob: {language_token}: {language_probability}")
+            # print(f"lang_prob: {language_token}: {language_probability}")
             language = language_token[2:-2]
             if language in allowed_languages:
                 selected_language = language
@@ -357,7 +391,31 @@ class FasterWhisperPipeline(Pipeline):
                 break
 
         print(f"Detected language: {selected_language} ({selected_language_probability:.2f}) in first 30s of audio...")
-        return selected_language
+        return selected_language, selected_language_probability
+    # def detect_language(self, audio):
+    #     # write(str(self.cnt)+str(uuid.uuid4()) + ".wav", SAMPLE_RATE, audio)
+    #     self.cnt+=1
+    #     tensor = torch.from_numpy(audio)
+    #     language_id = EncoderClassifier.from_hparams(source="speechbrain/lang-id-voxlingua107-ecapa", savedir="tmp")
+    #     prediction =  language_id.classify_batch(tensor)
+    #     print(prediction[3][0][:2])
+    #     return prediction[3][0][:2], round(float(prediction[1].exp()), 2)
+
+    def detect_language(self, audio):
+        # filename = str(self.cnt)+str(uuid.uuid4()) + ".wav"
+        # print(filename)
+        # write(filename, SAMPLE_RATE, audio)
+        self.cnt+=1
+        result = classifier(audio, device = self.device)
+        # Load model directly
+        # processor = AutoProcessor.from_pretrained("sanchit-gandhi/whisper-medium-fleurs-lang-id")
+        # model = AutoModelForAudioClassification.from_pretrained("sanchit-gandhi/whisper-medium-fleurs-lang-id")
+        # with torch.no_grad():
+        #     outputs = model(**filename).logits
+        #     print("Model outputs:", outputs)
+        lang_map = {'English': 'en','Hindi': 'hi','Bengali': 'bn','Telugu': 'te','Marathi': 'mr','Tamil': 'ta','Gujarati': 'gu','Kannada': 'kn','Oriya': 'or','Punjabi': 'pa','Malayalam': 'ml','Assamese': 'as','Urdu': 'ur'}
+        # print(f"{filename} ==> {lang_map.get(result[0]["label"],"en")} -- {result[0]["score"]}")
+        return lang_map.get(result[0]["label"],"en"), result[0]["score"]
 
 def load_model(whisper_arch,
                device,
@@ -425,6 +483,7 @@ def load_model(whisper_arch,
         "max_new_tokens": None,
         "clip_timestamps": None,
         "hallucination_silence_threshold": None,
+        "hotwords": None,
     }
 
     if asr_options is not None:
