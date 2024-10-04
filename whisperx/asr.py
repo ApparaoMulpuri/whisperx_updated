@@ -55,10 +55,11 @@ class WhisperModel(faster_whisper.WhisperModel):
         prompt = self.get_prompt(
             tokenizer,
             previous_tokens,
-            without_timestamps=options.without_timestamps,
+            without_timestamps=False,
             prefix=options.prefix,
         )
 
+        print(f"Prompt: {prompt}")
         encoder_output = self.encode(features)
 
         max_initial_timestamp_index = int(
@@ -81,12 +82,13 @@ class WhisperModel(faster_whisper.WhisperModel):
         def decode_batch(tokens: List[List[int]]) -> str:
             res = []
             for tk in tokens:
+                print(f"tokens: {tk}")
                 res.append([token for token in tk if token < tokenizer.eot])
             # text_tokens = [token for token in tokens if token < self.eot]
             return tokenizer.tokenizer.decode_batch(res)
 
         text = decode_batch(tokens_batch)
-
+        print(f"Text: {text}")
         return text
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
