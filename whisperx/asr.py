@@ -43,7 +43,7 @@ class WhisperModel(faster_whisper.WhisperModel):
     Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
     '''
 
-    def generate_segment_batched(self, features: np.ndarray, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions, encoder_output = None):
+    def generate_segment_batched(self, features: np.ndarray, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions, encoder_output=None):
         batch_size = features.shape[0]
         all_tokens = []
         prompt_reset_since = 0
@@ -67,35 +67,40 @@ class WhisperModel(faster_whisper.WhisperModel):
         )
 
         result = self.model.generate(
-                encoder_output,
-                [prompt] * batch_size,
-                beam_size=options.beam_size,
-                patience=options.patience,
-                length_penalty=options.length_penalty,
-                max_length=self.max_length,
-                suppress_blank=options.suppress_blank,
-                suppress_tokens=options.suppress_tokens,
-            )
+            encoder_output,
+            [prompt] * batch_size,
+            beam_size=options.beam_size,
+            patience=options.patience,
+            length_penalty=options.length_penalty,
+            max_length=self.max_length,
+            suppress_blank=options.suppress_blank,
+            suppress_tokens=options.suppress_tokens,
+        )
 
         tokens_batch = [x.sequences_ids[0] for x in result]
-        timestamps_batch = [x.timestamps[0] for x in result]
 
-        def decode_batch(tokens: List[List[int]], timestamps: List[List[float]]) -> List[dict]:
+        def decode_batch(tokens: List[List[int]]) -> List[dict]:
             res = []
-            for tk, ts in zip(tokens, timestamps):
+            for tk in tokens:
                 print(f"tokens: {tk}")
                 word_tokens = [token for token in tk if token < tokenizer.eot]
-                word_timestamps = ts[:len(word_tokens)]
                 words = tokenizer.tokenizer.decode_batch([word_tokens])[0].split()
+                word_timestamps = self.calculate_word_timestamps(word_tokens, len(features[0]), options.max_initial_timestamp)
                 res.append([
                     {"word": word, "timestamp": timestamp}
                     for word, timestamp in zip(words, word_timestamps)
                 ])
             return res
 
-        word_timestamps = decode_batch(tokens_batch, timestamps_batch)
+        word_timestamps = decode_batch(tokens_batch)
         print(f"Word Timestamps: {word_timestamps}")
         return word_timestamps
+
+    def calculate_word_timestamps(self, tokens: List[int], segment_duration: float, max_initial_timestamp: float) -> List[float]:
+        # Calculate timestamps based on token positions and segment duration
+        num_tokens = len(tokens)
+        timestamps = [max_initial_timestamp + (i / num_tokens) * segment_duration for i in range(num_tokens)]
+        return timestamps
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
