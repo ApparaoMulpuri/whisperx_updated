@@ -43,10 +43,6 @@ class WhisperModel(faster_whisper.WhisperModel):
     Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
     '''
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.cumulative_timestamp = 0.0
-
     def generate_segment_batched(self, features: np.ndarray, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions, encoder_output=None):
         batch_size = features.shape[0]
         all_tokens = []
@@ -98,16 +94,12 @@ class WhisperModel(faster_whisper.WhisperModel):
 
         word_timestamps = decode_batch(tokens_batch)
         print(f"Word Timestamps: {word_timestamps}")
-
-        # Update cumulative timestamp
-        self.cumulative_timestamp += len(features[0]) * self.time_precision
-
         return word_timestamps
 
-    def calculate_word_timestamps(self, tokens: List[int], segment_length: int, max_initial_timestamp: float) -> List[float]:
-        # Calculate timestamps based on token positions and segment length
+    def calculate_word_timestamps(self, tokens: List[int], segment_duration: float, max_initial_timestamp: float) -> List[float]:
+        # Calculate timestamps based on token positions and segment duration
         num_tokens = len(tokens)
-        timestamps = [self.cumulative_timestamp + (i / num_tokens) * segment_length * self.time_precision for i in range(num_tokens)]
+        timestamps = [max_initial_timestamp + (i / num_tokens) * segment_duration for i in range(num_tokens)]
         return timestamps
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
