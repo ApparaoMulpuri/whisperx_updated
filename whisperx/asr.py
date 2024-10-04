@@ -78,18 +78,24 @@ class WhisperModel(faster_whisper.WhisperModel):
             )
 
         tokens_batch = [x.sequences_ids[0] for x in result]
+        timestamps_batch = [x.timestamps[0] for x in result]
 
-        def decode_batch(tokens: List[List[int]]) -> str:
+        def decode_batch(tokens: List[List[int]], timestamps: List[List[float]]) -> List[dict]:
             res = []
-            for tk in tokens:
+            for tk, ts in zip(tokens, timestamps):
                 print(f"tokens: {tk}")
-                res.append([token for token in tk if token < tokenizer.eot])
-            # text_tokens = [token for token in tokens if token < self.eot]
-            return tokenizer.tokenizer.decode_batch(res)
+                word_tokens = [token for token in tk if token < tokenizer.eot]
+                word_timestamps = ts[:len(word_tokens)]
+                words = tokenizer.tokenizer.decode_batch([word_tokens])[0].split()
+                res.append([
+                    {"word": word, "timestamp": timestamp}
+                    for word, timestamp in zip(words, word_timestamps)
+                ])
+            return res
 
-        text = decode_batch(tokens_batch)
-        print(f"Text: {text}")
-        return text
+        word_timestamps = decode_batch(tokens_batch, timestamps_batch)
+        print(f"Word Timestamps: {word_timestamps}")
+        return word_timestamps
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
