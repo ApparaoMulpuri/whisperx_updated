@@ -85,7 +85,7 @@ class WhisperModel(faster_whisper.WhisperModel):
                 print(f"tokens: {tk}")
                 word_tokens = [token for token in tk if token < tokenizer.eot]
                 words = tokenizer.tokenizer.decode_batch([word_tokens])[0].split()
-                word_timestamps = self.calculate_word_timestamps(word_tokens, len(features[0]), options.max_initial_timestamp)
+                word_timestamps = self.calculate_word_timestamps(word_tokens, len(features[0]), options.max_initial_timestamp, tokenizer.language_code)
                 res.append([
                     {"word": word, "timestamp": timestamp}
                     for word, timestamp in zip(words, word_timestamps)
@@ -96,11 +96,24 @@ class WhisperModel(faster_whisper.WhisperModel):
         print(f"Word Timestamps: {word_timestamps}")
         return word_timestamps
 
-    def calculate_word_timestamps(self, tokens: List[int], segment_duration: float, max_initial_timestamp: float) -> List[float]:
-        # Calculate timestamps based on token positions and segment duration
+    def calculate_word_timestamps(self, tokens: List[int], segment_duration: float, max_initial_timestamp: float, language: str) -> List[float]:
+        # Adjust segment duration based on language-specific factors
+        adjusted_segment_duration = self.adjust_segment_duration(segment_duration, language)
+        
+        # Calculate timestamps based on token positions and adjusted segment duration
         num_tokens = len(tokens)
-        timestamps = [max_initial_timestamp + (i / num_tokens) * segment_duration for i in range(num_tokens)]
+        timestamps = [max_initial_timestamp + (i / num_tokens) * adjusted_segment_duration for i in range(num_tokens)]
         return timestamps
+    
+    def adjust_segment_duration(self, segment_duration: float, language: str) -> float:
+        # Placeholder for language-specific adjustments
+        # You can implement language-specific logic here
+        if language == "en":
+            return segment_duration * 1.0  # No adjustment for English
+        elif language == "es":
+            return segment_duration * 1.1  # Example adjustment for Spanish
+        # Add more language-specific adjustments as needed
+        return segment_duration
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
